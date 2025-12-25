@@ -236,13 +236,19 @@ function getStatementText(statement: ts.Statement, includeSortingValue: boolean,
 				}
 
 				// `import('module').Qualifier` or `typeof import('module').Qualifier`
-				if (ts.isImportTypeNode(node) && node.qualifier !== undefined && helpers.needStripImportFromImportTypeNode(node)) {
-					const newQualifier = recreateEntityName(node.qualifier, helpers);
-					if (node.isTypeOf) {
-						return ts.factory.createTypeQueryNode(newQualifier);
+				if (ts.isImportTypeNode(node) && node.qualifier !== undefined) {
+					if (helpers.resolveIdentifierName(node.qualifier) === 'unknown') {
+						return ts.factory.createKeywordTypeNode(ts.SyntaxKind.UnknownKeyword);
 					}
 
-					return ts.factory.createTypeReferenceNode(newQualifier, node.typeArguments);
+					if (helpers.needStripImportFromImportTypeNode(node)) {
+						const newQualifier = recreateEntityName(node.qualifier, helpers);
+						if (node.isTypeOf) {
+							return ts.factory.createTypeQueryNode(newQualifier);
+						}
+
+						return ts.factory.createTypeReferenceNode(newQualifier, node.typeArguments);
+					}
 				}
 
 				if (node !== statement) {

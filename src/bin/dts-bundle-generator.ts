@@ -55,6 +55,7 @@ interface ParsedArgs extends yargs.Arguments {
 	'external-inlines': string[] | undefined;
 	'external-imports': string[] | undefined;
 	'external-types': string[] | undefined;
+	'exclude-types': string[] | undefined;
 }
 /* eslint-enable @typescript-eslint/naming-convention */
 
@@ -152,6 +153,11 @@ function parseArgs(): ParsedArgs {
 			default: true,
 			description: 'By default all interfaces, types and const enums are marked as exported even if they aren\'t exported directly. This option allows you to disable this behavior so a node will be exported if it is exported from root source file only.',
 		})
+		.option('exclude-types', {
+			type: 'array',
+			description: 'Array of type names that should be replaced with `unknown` and excluded from the output',
+			coerce: toStringsArray,
+		})
 		.option('config', {
 			type: 'string',
 			description: 'File path to the generator config file',
@@ -220,6 +226,7 @@ function main(): void {
 						noBanner: args['no-banner'],
 						respectPreserveConstEnum: args['respect-preserve-const-enum'],
 						exportReferencedTypes: args['export-referenced-types'],
+						excludedTypes: args['exclude-types'],
 					},
 					failOnClass: args['fail-on-class'],
 				};
