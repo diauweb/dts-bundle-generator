@@ -1,5 +1,4 @@
 {
-  "private": true,
   "name": "dts-bundle-generator",
   "version": "9.5.1",
   "description": "DTS Bundle Generator",
