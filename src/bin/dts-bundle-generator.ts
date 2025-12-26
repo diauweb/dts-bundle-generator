@@ -155,7 +155,7 @@ function parseArgs(): ParsedArgs {
 		})
 		.option('exclude-types', {
 			type: 'array',
-			description: 'Array of type names that should be replaced with `unknown` and excluded from the output',
+			description: 'Array of regex patterns for type names that should be replaced with `unknown` and excluded from the output',
 			coerce: toStringsArray,
 		})
 		.option('config', {

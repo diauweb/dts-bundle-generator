@@ -119,9 +119,9 @@ Config file might be either JSON file or JS file with CommonJS export of the con
                 exportReferencedTypes: true,
 
                 /**
-                 * List of type names that should be replaced with `unknown` and excluded from the generated declarations.
+                 * List of regex patterns matching type names that should be replaced with `unknown` and excluded from the generated declarations.
                  */
-                excludedTypes: ['ExternalType'],
+                excludedTypes: ['^ExternalType$'],
             },
         },
     ],

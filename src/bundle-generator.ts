@@ -102,7 +102,7 @@ export interface OutputOptions {
 	exportReferencedTypes?: boolean;
 
 	/**
-	 * List of type names to be replaced with `unknown` and excluded from the generated declarations.
+	 * List of regex patterns for type names to be replaced with `unknown` and excluded from the generated declarations.
 	 */
 	excludedTypes?: string[];
 }
@@ -195,11 +195,26 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 		};
 
 		const outputOptions: OutputOptions = entryConfig.output || {};
-		const excludedTypeNames = new Set(outputOptions.excludedTypes || []);
+		const excludedTypePatterns = (outputOptions.excludedTypes || []).map((pattern: string) => {
+			if (pattern.length > 2000) {
+				throw new Error(`Excluded type pattern is too long: "${pattern.slice(0, 50)}..."`);
+			}
+
+			try {
+				return new RegExp(pattern);
+			} catch (error: unknown) {
+				const reason = error instanceof Error ? error.message : 'Unknown error';
+				throw new Error(`Invalid excludedTypes pattern "${pattern}": ${reason}`);
+			}
+		});
 		const excludedSymbols = new Set<ts.Symbol>();
 
+		function isNameExcluded(name: string): boolean {
+			return excludedTypePatterns.some((regex: RegExp) => regex.test(name));
+		}
+
 		function isIdentifierExcluded(identifier: ts.Identifier): boolean {
-			return excludedTypeNames.has(identifier.text);
+			return isNameExcluded(identifier.text);
 		}
 
 		function isSymbolExcluded(symbol: ts.Symbol | null): boolean {
@@ -208,7 +223,7 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 			}
 
 			const actualSymbol = getActualSymbol(symbol, typeChecker);
-			return excludedSymbols.has(actualSymbol) || excludedTypeNames.has(actualSymbol.getName());
+			return excludedSymbols.has(actualSymbol) || isNameExcluded(actualSymbol.getName());
 		}
 
 		function markSymbolExcluded(symbol: ts.Symbol | null): void {
@@ -225,7 +240,7 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 				return true;
 			}
 
-			if (excludedTypeNames.has(entityName.getText())) {
+			if (isNameExcluded(entityName.getText())) {
 				return true;
 			}
 
@@ -245,7 +260,7 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 		}
 
 		const rootFileExports = getExportsForSourceFile(typeChecker, rootSourceFileSymbol).filter((exp: SourceFileExport) => {
-			if (excludedTypeNames.has(exp.exportedName) || isSymbolExcluded(exp.symbol)) {
+			if (isNameExcluded(exp.exportedName) || isSymbolExcluded(exp.symbol)) {
 				markSymbolExcluded(exp.symbol);
 				return false;
 			}
