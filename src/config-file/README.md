@@ -117,6 +117,11 @@ Config file might be either JSON file or JS file with CommonJS export of the con
                  * This option allows you to disable this behavior so a node will be exported if it is exported from root source file only.
                  */
                 exportReferencedTypes: true,
+
+                /**
+                 * List of regex patterns matching type names that should be replaced with `unknown` and excluded from the generated declarations.
+                 */
+                excludedTypes: ['^ExternalType$'],
             },
         },
     ],

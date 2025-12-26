@@ -100,6 +100,11 @@ export interface OutputOptions {
 	 * This option allows you to disable this behavior so a node will be exported if it is exported from root source file only.
 	 */
 	exportReferencedTypes?: boolean;
+
+	/**
+	 * List of regex patterns for type names to be replaced with `unknown` and excluded from the generated declarations.
+	 */
+	excludedTypes?: string[];
 }
 
 export interface LibrariesOptions {
@@ -177,9 +182,6 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 			typeRoots,
 		};
 
-		const rootFileExports = getExportsForSourceFile(typeChecker, rootSourceFileSymbol);
-		const rootFileExportSymbols = rootFileExports.map((exp: SourceFileExport) => exp.symbol);
-
 		interface CollectingResult extends Omit<OutputInputData, 'statements'> {
 			statements: ts.Statement[];
 		}
@@ -193,6 +195,80 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 		};
 
 		const outputOptions: OutputOptions = entryConfig.output || {};
+		const excludedTypePatterns = (outputOptions.excludedTypes || []).map((pattern: string) => {
+			if (pattern.length > 2000) {
+				throw new Error(`Excluded type pattern is too long: "${pattern.slice(0, 50)}..."`);
+			}
+
+			try {
+				return new RegExp(pattern);
+			} catch (error: unknown) {
+				const reason = error instanceof Error ? error.message : 'Unknown error';
+				throw new Error(`Invalid excludedTypes pattern "${pattern}": ${reason}`);
+			}
+		});
+		const excludedSymbols = new Set<ts.Symbol>();
+
+		function isNameExcluded(name: string): boolean {
+			return excludedTypePatterns.some((regex: RegExp) => regex.test(name));
+		}
+
+		function isIdentifierExcluded(identifier: ts.Identifier): boolean {
+			return isNameExcluded(identifier.text);
+		}
+
+		function isSymbolExcluded(symbol: ts.Symbol | null): boolean {
+			if (symbol === null) {
+				return false;
+			}
+
+			const actualSymbol = getActualSymbol(symbol, typeChecker);
+			return excludedSymbols.has(actualSymbol) || isNameExcluded(actualSymbol.getName());
+		}
+
+		function markSymbolExcluded(symbol: ts.Symbol | null): void {
+			if (symbol === null) {
+				return;
+			}
+
+			excludedSymbols.add(getActualSymbol(symbol, typeChecker));
+		}
+
+		function isEntityNameExcluded(entityName: ts.EntityName | ts.PropertyAccessEntityNameExpression): boolean {
+			const symbol = typeChecker.getSymbolAtLocation(entityName);
+			if (symbol !== undefined && isSymbolExcluded(symbol)) {
+				return true;
+			}
+
+			if (isNameExcluded(entityName.getText())) {
+				return true;
+			}
+
+			if (ts.isIdentifier(entityName)) {
+				return isIdentifierExcluded(entityName);
+			}
+
+			if (ts.isQualifiedName(entityName)) {
+				return isEntityNameExcluded(entityName.left) || isEntityNameExcluded(entityName.right);
+			}
+
+			if (ts.isPropertyAccessExpression(entityName)) {
+				return isEntityNameExcluded(entityName.expression as ts.PropertyAccessEntityNameExpression) || isIdentifierExcluded(entityName.name);
+			}
+
+			return false;
+		}
+
+		const rootFileExports = getExportsForSourceFile(typeChecker, rootSourceFileSymbol).filter((exp: SourceFileExport) => {
+			if (isNameExcluded(exp.exportedName) || isSymbolExcluded(exp.symbol)) {
+				markSymbolExcluded(exp.symbol);
+				return false;
+			}
+
+			return true;
+		});
+		const rootFileExportSymbols = rootFileExports.map((exp: SourceFileExport) => exp.symbol);
+
 		const inlineDeclareGlobals = Boolean(outputOptions.inlineDeclareGlobals);
 		const inlineDeclareExternals = Boolean(outputOptions.inlineDeclareExternals);
 
@@ -472,6 +548,45 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 				return findResultRecursively(referencedModuleSymbol, nodeSymbol, new Set());
 			}
 
+			type NamedReExportDeclaration = ts.ExportDeclaration & { moduleSpecifier: ts.Expression; exportClause: ts.NamedExports };
+
+			function handleReExportWithModuleSpecifier(reExportDeclaration: NamedReExportDeclaration): void {
+				const referencedModuleSymbol = getNodeOwnSymbol(reExportDeclaration.moduleSpecifier, typeChecker);
+
+				// in this case we want to find all elements that we re-exported via `export * from` exports as they aren't handled elsewhere
+				for (const exportElement of reExportDeclaration.exportClause.elements) {
+					const exportedNodeSymbol = getActualSymbol(getImportExportReferencedSymbol(exportElement, typeChecker), typeChecker);
+
+					if (isSymbolExcluded(exportedNodeSymbol)) {
+						continue;
+					}
+
+					const exportingExportStarResult = findExportingExportStarExportFromImportableModule(
+						referencedModuleSymbol,
+						exportedNodeSymbol
+					);
+
+					if (exportingExportStarResult === null) {
+						continue;
+					}
+
+					const importModuleSpecifier = getImportModuleName(exportingExportStarResult.exportStarDeclaration);
+					if (importModuleSpecifier === null) {
+						throw new Error(`Cannot get import module name from '${exportingExportStarResult.exportStarDeclaration.getText()}'`);
+					}
+
+					// technically we could use named imports and then add re-exports
+					// but this solution affects names scope (re-exports don't affect it)
+					// and also it is slightly complicated to find a name declaration (identifier) that needs to be imported
+					// so it feels better to go this way, but happy to change in the future if there would be any issues
+					addReExport(
+						getImportItem(importModuleSpecifier),
+						exportingExportStarResult.exportedNodeSymbol.getName(),
+						exportElement.name.text
+					);
+				}
+			}
+
 			// `export * from 'module'`
 			if (exportDeclaration.exportClause === undefined) {
 				handleExportStarStatement(exportDeclaration);
@@ -483,6 +598,10 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 				if (exportDeclaration.moduleSpecifier === undefined) {
 					for (const exportElement of exportDeclaration.exportClause.elements) {
 						const exportElementSymbol = getImportExportReferencedSymbol(exportElement, typeChecker);
+
+						if (isSymbolExcluded(exportElementSymbol)) {
+							continue;
+						}
 
 						const namespaceImportFromImportableModule = getDeclarationsForSymbol(exportElementSymbol).find((importDecl: ts.Declaration): importDecl is ts.NamespaceImport => {
 							// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
@@ -508,36 +627,7 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 
 				// `export { val, val2 } from 'module'`
 				if (exportDeclaration.moduleSpecifier !== undefined) {
-					const referencedModuleSymbol = getNodeOwnSymbol(exportDeclaration.moduleSpecifier, typeChecker);
-
-					// in this case we want to find all elements that we re-exported via `export * from` exports as they aren't handled elsewhere
-					for (const exportElement of exportDeclaration.exportClause.elements) {
-						const exportedNodeSymbol = getActualSymbol(getImportExportReferencedSymbol(exportElement, typeChecker), typeChecker);
-						const exportingExportStarResult = findExportingExportStarExportFromImportableModule(
-							referencedModuleSymbol,
-							exportedNodeSymbol
-						);
-
-						if (exportingExportStarResult === null) {
-							continue;
-						}
-
-						const importModuleSpecifier = getImportModuleName(exportingExportStarResult.exportStarDeclaration);
-						if (importModuleSpecifier === null) {
-							throw new Error(`Cannot get import module name from '${exportingExportStarResult.exportStarDeclaration.getText()}'`);
-						}
-
-						// technically we could use named imports and then add re-exports
-						// but this solution affects names scope (re-exports don't affect it)
-						// and also it is slightly complicated to find a name declaration (identifier) that needs to be imported
-						// so it feels better to go this way, but happy to change in the future if there would be any issues
-						addReExport(
-							getImportItem(importModuleSpecifier),
-							exportingExportStarResult.exportedNodeSymbol.getName(),
-							exportElement.name.text
-						);
-					}
-
+					handleReExportWithModuleSpecifier(exportDeclaration as NamedReExportDeclaration);
 					return;
 				}
 			}
@@ -867,6 +957,14 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 
 		// eslint-disable-next-line complexity
 		function isNodeUsed(node: ts.Node): boolean {
+			if (isNodeNamedDeclaration(node)) {
+				const nodeName = getNodeName(node);
+				if (nodeName !== undefined && ts.isIdentifier(nodeName) && isIdentifierExcluded(nodeName)) {
+					markSymbolExcluded(getNodeSymbol(node, typeChecker));
+					return false;
+				}
+			}
+
 			if (isNodeNamedDeclaration(node) || ts.isSourceFile(node)) {
 				const nodeSymbol = getNodeSymbol(node, typeChecker);
 				if (nodeSymbol === null) {
@@ -918,10 +1016,18 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 				return false;
 			}
 
+			if (isSymbolExcluded(nodeSymbol)) {
+				return false;
+			}
+
 			return shouldSymbolBeImported(nodeSymbol);
 		}
 
 		function shouldSymbolBeImported(nodeSymbol: ts.Symbol): boolean {
+			if (isSymbolExcluded(nodeSymbol)) {
+				return false;
+			}
+
 			const isSymbolDeclaredInDefaultLibrary = getDeclarationsForSymbol(nodeSymbol).some(
 				(declaration: ts.Declaration) => program.isSourceFileDefaultLibrary(declaration.getSourceFile())
 			);
@@ -973,6 +1079,10 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 				throw new Error(`Something went wrong - getSymbolsUsingSymbol returned null but expected to be a set of symbols (symbol=${nodeSymbol.name})`);
 			}
 
+			if (isSymbolExcluded(nodeSymbol)) {
+				return [];
+			}
+
 			return [
 				...(rootFileExportSymbols.includes(nodeSymbol) ? [nodeSymbol] : []),
 
@@ -1004,7 +1114,7 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 			function addSymbolToNamespaceExports(namespaceExports: Map<string, string>, symbol: ts.Symbol): void {
 				// if a symbol isn't used by the namespace symbol it might mean that it shouldn't be included into the bundle because of tree-shaking
 				// in this case we shouldn't even try to add such symbol to the namespace
-				if (!typesUsageEvaluator.isSymbolUsedBySymbol(symbol, namespaceSymbol)) {
+				if (isSymbolExcluded(symbol) || !typesUsageEvaluator.isSymbolUsedBySymbol(symbol, namespaceSymbol)) {
 					return;
 				}
 
@@ -1287,6 +1397,10 @@ export function generateDtsBundle(entries: readonly EntryPointConfig[], options:
 			{
 				...collectionResult,
 				resolveIdentifierName: (identifier: ts.Identifier | ts.QualifiedName | ts.PropertyAccessEntityNameExpression): string | null => {
+					if (isEntityNameExcluded(identifier)) {
+						return 'unknown';
+					}
+
 					if (ts.isPropertyAccessOrQualifiedName(identifier)) {
 						return collisionsResolver.resolveReferencedQualifiedName(identifier);
 					} else {

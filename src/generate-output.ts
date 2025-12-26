@@ -235,14 +235,39 @@ function getStatementText(statement: ts.Statement, includeSortingValue: boolean,
 					}
 				}
 
+				const resolvedEntityName = (entity: ts.EntityName | ts.PropertyAccessEntityNameExpression): string | null => {
+					return helpers.resolveIdentifierName(entity);
+				};
+
 				// `import('module').Qualifier` or `typeof import('module').Qualifier`
-				if (ts.isImportTypeNode(node) && node.qualifier !== undefined && helpers.needStripImportFromImportTypeNode(node)) {
-					const newQualifier = recreateEntityName(node.qualifier, helpers);
-					if (node.isTypeOf) {
-						return ts.factory.createTypeQueryNode(newQualifier);
+				if (ts.isImportTypeNode(node) && node.qualifier !== undefined) {
+					const resolved = resolvedEntityName(node.qualifier);
+					if (resolved === 'unknown') {
+						return ts.factory.createKeywordTypeNode(ts.SyntaxKind.UnknownKeyword);
 					}
 
-					return ts.factory.createTypeReferenceNode(newQualifier, node.typeArguments);
+					if (helpers.needStripImportFromImportTypeNode(node)) {
+						const newQualifier = recreateEntityName(node.qualifier, helpers);
+						if (node.isTypeOf) {
+							return ts.factory.createTypeQueryNode(newQualifier);
+						}
+
+						return ts.factory.createTypeReferenceNode(newQualifier, node.typeArguments);
+					}
+				}
+
+				if (ts.isTypeReferenceNode(node)) {
+					const resolved = resolvedEntityName(node.typeName);
+					if (resolved === 'unknown') {
+						return ts.factory.createKeywordTypeNode(ts.SyntaxKind.UnknownKeyword);
+					}
+				}
+
+				if (ts.isExpressionWithTypeArguments(node)) {
+					const resolved = resolvedEntityName(node.expression as ts.EntityName);
+					if (resolved === 'unknown') {
+						return ts.factory.createExpressionWithTypeArguments(ts.factory.createIdentifier('any'), undefined);
+					}
 				}
 
 				if (node !== statement) {
