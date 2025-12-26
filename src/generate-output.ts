@@ -235,9 +235,14 @@ function getStatementText(statement: ts.Statement, includeSortingValue: boolean,
 					}
 				}
 
+				const resolvedEntityName = (entity: ts.EntityName | ts.PropertyAccessEntityNameExpression): string | null => {
+					return helpers.resolveIdentifierName(entity);
+				};
+
 				// `import('module').Qualifier` or `typeof import('module').Qualifier`
 				if (ts.isImportTypeNode(node) && node.qualifier !== undefined) {
-					if (helpers.resolveIdentifierName(node.qualifier) === 'unknown') {
+					const resolved = resolvedEntityName(node.qualifier);
+					if (resolved === 'unknown') {
 						return ts.factory.createKeywordTypeNode(ts.SyntaxKind.UnknownKeyword);
 					}
 
@@ -248,6 +253,20 @@ function getStatementText(statement: ts.Statement, includeSortingValue: boolean,
 						}
 
 						return ts.factory.createTypeReferenceNode(newQualifier, node.typeArguments);
+					}
+				}
+
+				if (ts.isTypeReferenceNode(node)) {
+					const resolved = resolvedEntityName(node.typeName);
+					if (resolved === 'unknown') {
+						return ts.factory.createKeywordTypeNode(ts.SyntaxKind.UnknownKeyword);
+					}
+				}
+
+				if (ts.isExpressionWithTypeArguments(node)) {
+					const resolved = resolvedEntityName(node.expression as ts.EntityName);
+					if (resolved === 'unknown') {
+						return ts.factory.createExpressionWithTypeArguments(ts.factory.createIdentifier('any'), undefined);
 					}
 				}
 
